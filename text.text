@@ -1,0 +1,573 @@
+mkdir -p .github/workflows app/src/main/res/values app/src/main/res/xml app/src/main/java/com/appcontroller/tool
+
+cat << 'EOF' > .github/workflows/build-apk.yml
+name: Build App Controller APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: App-Controller-Phase1-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+EOF
+
+cat << 'EOF' > settings.gradle.kts
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "AppControllerPhase1"
+include(":app")
+EOF
+
+cat << 'EOF' > build.gradle.kts
+plugins {
+    id("com.android.application") version "8.5.0" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+}
+EOF
+
+cat << 'EOF' > gradle.properties
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+kotlin.code.style=official
+EOF
+
+cat << 'EOF' > app/build.gradle.kts
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.appcontroller.tool"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.appcontroller.tool"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+}
+EOF
+
+cat << 'EOF' > app/src/main/res/values/themes.xml
+<resources>
+    <style name="Theme.AppController" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">#6D28D9</item>
+        <item name="colorPrimaryDark">#0D9488</item>
+        <item name="colorAccent">#2563EB</item>
+    </style>
+</resources>
+EOF
+
+cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.xml
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100" />
+EOF
+
+cat << 'EOF' > app/src/main/AndroidManifest.xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:allowBackup="true"
+        android:label="تحكم التطبيقات"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppController">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ForceStopAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+</manifest>
+EOF
+
+cat << 'EOF' > app/src/main/java/com/appcontroller/tool/AppItem.kt
+package com.appcontroller.tool
+
+import android.graphics.drawable.Drawable
+
+data class AppItem(
+    val name: String,
+    val packageName: String,
+    val icon: Drawable
+)
+EOF
+
+cat << 'EOF' > app/src/main/java/com/appcontroller/tool/ForceStopAccessibilityService.kt
+package com.appcontroller.tool
+
+import android.accessibilityservice.AccessibilityService
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+
+class ForceStopAccessibilityService : AccessibilityService() {
+
+    companion object {
+        const val PREFS_NAME = "ForceStopPrefs"
+        const val KEY_TARGET_PKG = "target_package"
+        const val KEY_PENDING_STOP = "pending_stop"
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var lastActionTime = 0L
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val isPending = prefs.getBoolean(KEY_PENDING_STOP, false)
+        val targetPkg = prefs.getString(KEY_TARGET_PKG, null)
+
+        if (!isPending || targetPkg.isNullOrEmpty()) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastActionTime < 350) return
+
+        val root = rootInActiveWindow ?: return
+
+        // البحث عن زر أو نص "فرض الإيقاف" / "Force stop"
+        val forceStopTexts = listOf(
+            "فرض الإيقاف",
+            "إيقاف إجباري",
+            "Force stop",
+            "Force Stop"
+        )
+        val forceStopNode = findClickableNodeByText(root, forceStopTexts)
+        if (forceStopNode != null) {
+            lastActionTime = now
+            performClick(forceStopNode)
+            return
+        }
+
+        // البحث عن زر تأكيد الإيقاف في نافذة التأكيد المنبثقة ("موافق" / "فرض الإيقاف" / "OK")
+        val confirmTexts = listOf(
+            "موافق",
+            "فرض الإيقاف",
+            "إيقاف",
+            "OK",
+            "Force stop"
+        )
+        val confirmNode = findClickableNodeByText(root, confirmTexts)
+        if (confirmNode != null && isInsideDialogOrAlert(root)) {
+            lastActionTime = now
+            performClick(confirmNode)
+            prefs.edit().putBoolean(KEY_PENDING_STOP, false).apply()
+
+            // العودة إلى تطبيق التحكم بعد إتمام الإيقاف بنجاح
+            handler.postDelayed({
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                handler.postDelayed({
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }, 250)
+            }, 350)
+        }
+    }
+
+    private fun isInsideDialogOrAlert(root: AccessibilityNodeInfo): Boolean {
+        val cancelTexts = listOf("إلغاء", "Cancel")
+        return findNodeByText(root, cancelTexts) != null
+    }
+
+    private fun findNodeByText(node: AccessibilityNodeInfo?, texts: List<String>): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val nodeText = node.text?.toString()?.trim()
+        val nodeDesc = node.contentDescription?.toString()?.trim()
+        for (t in texts) {
+            if (!nodeText.isNullOrEmpty() && nodeText.equals(t, ignoreCase = true)) return node
+            if (!nodeDesc.isNullOrEmpty() && nodeDesc.equals(t, ignoreCase = true)) return node
+        }
+        for (i in 0 until node.childCount) {
+            val res = findNodeByText(node.getChild(i), texts)
+            if (res != null) return res
+        }
+        return null
+    }
+
+    private fun findClickableNodeByText(node: AccessibilityNodeInfo?, texts: List<String>): AccessibilityNodeInfo? {
+        val target = findNodeByText(node, texts) ?: return null
+        var current: AccessibilityNodeInfo? = target
+        while (current != null) {
+            if (current.isClickable && current.isEnabled) {
+                return current
+            }
+            current = current.parent
+        }
+        return if (target.isEnabled) target else null
+    }
+
+    private fun performClick(node: AccessibilityNodeInfo) {
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    override fun onInterrupt() {}
+}
+EOF
+
+cat << 'EOF' > app/src/main/java/com/appcontroller/tool/MainActivity.kt
+package com.appcontroller.tool
+
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Bundle
+import android.provider.Settings
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.*
+import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var statusBanner: TextView
+    private lateinit var enableServiceBtn: Button
+    private lateinit var recyclerView: RecyclerView
+    private lateinit var allApps: List<AppItem>
+    private lateinit var adapter: AppsAdapter
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#0B1020"))
+            setPadding(24, 24, 24, 24)
+        }
+
+        // شريط حالة صلاحية الوصول
+        statusBanner = TextView(this).apply {
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            setPadding(24, 20, 24, 20)
+        }
+        root.addView(statusBanner)
+
+        // زر تفعيل صلاحية إمكانية الوصول مباشرة
+        enableServiceBtn = Button(this).apply {
+            text = "تفعيل صلاحية إمكانية الوصول (مطلوب لفرض الإيقاف)"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            isAllCaps = false
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.parseColor("#7C3AED"), Color.parseColor("#2563EB"), Color.parseColor("#0D9488"))
+            )
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }
+        val btnParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 16; bottomMargin = 16 }
+        root.addView(enableServiceBtn, btnParams)
+
+        // حقل بحث سريع عن التطبيق (مثل X أو تويتر)
+        val searchInput = EditText(this).apply {
+            hint = "ابحث عن تطبيق (مثال: X أو Twitter)..."
+            setHintTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#162038"))
+            setPadding(24, 20, 24, 20)
+            textSize = 15f
+        }
+        val searchParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 16 }
+        root.addView(searchInput, searchParams)
+
+        allApps = loadInstalledApps()
+        adapter = AppsAdapter(
+            allApps.toMutableList(),
+            onForceStop = { app -> triggerForceStop(app) },
+            onLaunch = { app -> triggerLaunch(app) }
+        )
+
+        recyclerView = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = this@MainActivity.adapter
+        }
+        root.addView(
+            recyclerView,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val query = s?.toString()?.trim()?.lowercase() ?: ""
+                val filtered = if (query.isEmpty()) {
+                    allApps
+                } else {
+                    allApps.filter {
+                        it.name.lowercase().contains(query) || it.packageName.lowercase().contains(query)
+                    }
+                }
+                adapter.updateList(filtered)
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        setContentView(root)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateServiceStatusUI()
+    }
+
+    private fun updateServiceStatusUI() {
+        val enabled = isAccessibilityServiceEnabled()
+        if (enabled) {
+            statusBanner.text = "الحالة: صلاحية إمكانية الوصول مفعّلة — جاهز لفرض الإيقاف والتشغيل"
+            statusBanner.setBackgroundColor(Color.parseColor("#0F766E"))
+            enableServiceBtn.visibility = View.GONE
+        } else {
+            statusBanner.text = "الحالة: صلاحية إمكانية الوصول غير مفعّلة بعد"
+            statusBanner.setBackgroundColor(Color.parseColor("#991B1B"))
+            enableServiceBtn.visibility = View.VISIBLE
+        }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expectedComponent = "$packageName/${ForceStopAccessibilityService::class.java.name}"
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        return enabledServices.split(":").any { it.equals(expectedComponent, ignoreCase = true) }
+    }
+
+    private fun triggerForceStop(app: AppItem) {
+        if (!isAccessibilityServiceEnabled()) {
+            Toast.makeText(this, "فعّل صلاحية إمكانية الوصول أولاً", Toast.LENGTH_SHORT).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            return
+        }
+
+        val prefs = getSharedPreferences(ForceStopAccessibilityService.PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString(ForceStopAccessibilityService.KEY_TARGET_PKG, app.packageName)
+            .putBoolean(ForceStopAccessibilityService.KEY_PENDING_STOP, true)
+            .apply()
+
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${app.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    private fun triggerLaunch(app: AppItem) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launchIntent)
+        } else {
+            Toast.makeText(this, "لا يمكن تشغيل هذا التطبيق مباشرة", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun loadInstalledApps(): List<AppItem> {
+        val pm = packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        return packages
+            .filter { it.packageName != packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
+            .map { appInfo ->
+                AppItem(
+                    name = pm.getApplicationLabel(appInfo).toString(),
+                    packageName = appInfo.packageName,
+                    icon = pm.getApplicationIcon(appInfo)
+                )
+            }
+            .sortedBy { it.name.lowercase() }
+    }
+
+    private class AppsAdapter(
+        private val items: MutableList<AppItem>,
+        private val onForceStop: (AppItem) -> Unit,
+        private val onLaunch: (AppItem) -> Unit
+    ) : RecyclerView.Adapter<AppsAdapter.AppViewHolder>() {
+
+        class AppViewHolder(val row: LinearLayout) : RecyclerView.ViewHolder(row) {
+            lateinit var iconView: ImageView
+            lateinit var nameView: TextView
+            lateinit var stopBtn: Button
+            lateinit var launchBtn: Button
+        }
+
+        fun updateList(newList: List<AppItem>) {
+            items.clear()
+            items.addAll(newList)
+            notifyDataSetChanged()
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AppViewHolder {
+            val ctx = parent.context
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(Color.parseColor("#131C31"))
+                setPadding(18, 16, 18, 16)
+                layoutParams = RecyclerView.LayoutParams(
+                    RecyclerView.LayoutParams.MATCH_PARENT,
+                    RecyclerView.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = 12 }
+            }
+
+            val iconView = ImageView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(84, 84)
+            }
+
+            val nameView = TextView(ctx).apply {
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                setPadding(16, 0, 12, 0)
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val stopBtn = Button(ctx).apply {
+                text = "إيقاف"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#DC2626"))
+                isAllCaps = false
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = 8 }
+            }
+
+            val launchBtn = Button(ctx).apply {
+                text = "تشغيل"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#0D9488"))
+                isAllCaps = false
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+
+            row.addView(iconView)
+            row.addView(nameView)
+            row.addView(stopBtn)
+            row.addView(launchBtn)
+
+            return AppViewHolder(row).apply {
+                this.iconView = iconView
+                this.nameView = nameView
+                this.stopBtn = stopBtn
+                this.launchBtn = launchBtn
+            }
+        }
+
+        override fun onBindViewHolder(holder: AppViewHolder, position: Int) {
+            val item = items[position]
+            holder.iconView.setImageDrawable(item.icon)
+            holder.nameView.text = item.name
+            holder.stopBtn.setOnClickListener { onForceStop(item) }
+            holder.launchBtn.setOnClickListener { onLaunch(item) }
+        }
+
+        override fun getItemCount(): Int = items.size
+    }
+}
+EOF
