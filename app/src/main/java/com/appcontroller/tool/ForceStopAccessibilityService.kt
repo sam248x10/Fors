@@ -43,7 +43,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         }
 
         private val stopLabels = listOf("Force stop", "فرض الإيقاف", "فرض إيقاف", "إيقاف إجباري", "إيقاف بالقوة")
-        private val confirmationLabels = stopLabels + listOf("OK", "موافق", "إيقاف", "Stop")
+        private val confirmationLabels = listOf("OK", "موافق", "إيقاف", "Stop") + stopLabels
         private val cancelLabels = listOf("Cancel", "إلغاء")
     }
 
@@ -54,7 +54,19 @@ class ForceStopAccessibilityService : AccessibilityService() {
     private var singleTarget: Target? = null
     private var stopped = 0
     private var skipped = 0
-    private val timeout = Runnable { completeTarget(success = false) }
+    private val failures = mutableListOf<String>()
+    private val timeout = Runnable {
+        val current = request
+        if (current != null) {
+            val reason = when {
+                current.confirmationClicked -> "لم يؤكّد أندرويد أن التطبيق أصبح موقوفًا"
+                current.appInfoWindowId != null -> "لم تُلتقط نافذة التأكيد"
+                else -> "زر فرض الإيقاف غير متاح أو لم يظهر"
+            }
+            failures.add("${current.target.name}: $reason")
+        }
+        completeTarget(success = false)
+    }
     private val poll = object : Runnable {
         override fun run() {
             val current = request ?: return
@@ -77,6 +89,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         singleTarget = queue.singleOrNull()
         stopped = 0
         skipped = 0
+        failures.clear()
         running = true
         openNextTarget(activity)
         return true
@@ -97,6 +110,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         val settingsPackage = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
             ?.activityInfo?.packageName
         if (settingsPackage == null) {
+            failures.add("${target.name}: تعذّر فتح صفحة معلومات التطبيق")
             completeTarget(success = false)
             return
         }
@@ -105,7 +119,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         try {
             activity.startActivity(intent.setPackage(settingsPackage))
             handler.postDelayed(poll, 250L)
-            handler.postDelayed(timeout, 6_000L)
+            handler.postDelayed(timeout, 10_000L)
         } catch (_: ActivityNotFoundException) {
             completeTarget(success = false)
         } catch (_: SecurityException) {
@@ -141,10 +155,15 @@ class ForceStopAccessibilityService : AccessibilityService() {
             if (!hasCancel) return
             val positiveButton = root.findAccessibilityNodeInfosByViewId("android:id/button1")
                 .orEmpty().firstOrNull { it.isVisibleToUser && matchesLabel(it, confirmationLabels) }
-            val confirmationNode = positiveButton ?: findLabel(root, confirmationLabels)?.takeIf {
-                root.windowId != current.appInfoWindowId || !matchesLabel(it, stopLabels)
-            }
-            val confirmation = findClickTarget(confirmationNode) ?: return
+            val confirmation = findClickTarget(positiveButton) ?: confirmationLabels.firstNotNullOfOrNull { label ->
+                if (root.windowId == current.appInfoWindowId && label in stopLabels) {
+                    null
+                } else {
+                    root.findAccessibilityNodeInfosByText(label).orEmpty().firstNotNullOfOrNull { node ->
+                        if (matchesLabel(node, listOf(label))) findClickTarget(node) else null
+                    }
+                }
+            } ?: return
             if (confirmation.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 current.confirmationClicked = true
             }
@@ -178,7 +197,8 @@ class ForceStopAccessibilityService : AccessibilityService() {
             stopped == 1 -> "تم فرض إيقاف ${target.name}."
             else -> "تعذّر فرض إيقاف ${target.name}."
         }
-        returnToController(message)
+        val details = failures.joinToString("\n")
+        returnToController(if (details.isEmpty()) message else "$message\n\n$details")
     }
 
     private fun returnToController(message: String? = null) {
