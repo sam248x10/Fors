@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
@@ -20,7 +21,8 @@ class ForceStopAccessibilityService : AccessibilityService() {
         val target: Target,
         val settingsPackage: String,
         val openedAt: Long,
-        var appInfoWindowId: Int? = null
+        var appInfoWindowId: Int? = null,
+        var confirmationClicked: Boolean = false
     )
 
     companion object {
@@ -31,6 +33,14 @@ class ForceStopAccessibilityService : AccessibilityService() {
         }
 
         internal const val EXTRA_RESULT = "com.appcontroller.tool.STOP_RESULT"
+        internal const val EXTRA_CONTINUE = "com.appcontroller.tool.STOP_CONTINUE"
+
+        internal fun continueQueue(activity: Activity) {
+            val service = connectedService ?: return
+            if (service.running && service.request == null && service.queue.isNotEmpty()) {
+                service.openNextTarget(activity)
+            }
+        }
 
         private val stopLabels = listOf("Force stop", "فرض الإيقاف", "فرض إيقاف", "إيقاف إجباري", "إيقاف بالقوة")
         private val confirmationLabels = stopLabels + listOf("OK", "موافق", "إيقاف", "Stop")
@@ -45,7 +55,16 @@ class ForceStopAccessibilityService : AccessibilityService() {
     private var stopped = 0
     private var skipped = 0
     private val timeout = Runnable { completeTarget(success = false) }
-    private val advance = Runnable { openNextTarget() }
+    private val poll = object : Runnable {
+        override fun run() {
+            val current = request ?: return
+            inspectSettings(current)
+            if (request === current) handler.postDelayed(this, 250L)
+        }
+    }
+    private val advance = Runnable {
+        if (queue.isEmpty()) finishQueue() else returnToController()
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -63,7 +82,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         return true
     }
 
-    private fun openNextTarget(activity: Activity? = null) {
+    private fun openNextTarget(activity: Activity) {
         if (!running) return
         val target = queue.removeFirstOrNull()
         if (target == null) {
@@ -84,12 +103,8 @@ class ForceStopAccessibilityService : AccessibilityService() {
 
         request = Request(target, settingsPackage, SystemClock.uptimeMillis())
         try {
-            intent.setPackage(settingsPackage)
-            if (activity != null) {
-                activity.startActivity(intent)
-            } else {
-                startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
+            activity.startActivity(intent.setPackage(settingsPackage))
+            handler.postDelayed(poll, 250L)
             handler.postDelayed(timeout, 6_000L)
         } catch (_: ActivityNotFoundException) {
             completeTarget(success = false)
@@ -103,7 +118,21 @@ class ForceStopAccessibilityService : AccessibilityService() {
         if (event == null || event.eventTime < current.openedAt ||
             event.packageName?.toString() != current.settingsPackage
         ) return
+        inspectSettings(current)
+    }
 
+    private fun inspectSettings(current: Request) {
+        try {
+            val info = packageManager.getApplicationInfo(current.target.packageName, 0)
+            if (info.flags and ApplicationInfo.FLAG_STOPPED != 0) {
+                completeTarget(success = true)
+                return
+            }
+        } catch (_: PackageManager.NameNotFoundException) {
+            completeTarget(success = false)
+            return
+        }
+        if (current.confirmationClicked) return
         val root = rootInActiveWindow ?: return
         if (root.packageName?.toString() != current.settingsPackage) return
         val hasCancel = findLabel(root, cancelLabels) != null ||
@@ -112,14 +141,12 @@ class ForceStopAccessibilityService : AccessibilityService() {
             if (!hasCancel) return
             val positiveButton = root.findAccessibilityNodeInfosByViewId("android:id/button1")
                 .orEmpty().firstOrNull { it.isVisibleToUser && matchesLabel(it, confirmationLabels) }
-            val confirmationNode = positiveButton ?: if (root.windowId != current.appInfoWindowId) {
-                findLabel(root, confirmationLabels)
-            } else {
-                null
+            val confirmationNode = positiveButton ?: findLabel(root, confirmationLabels)?.takeIf {
+                root.windowId != current.appInfoWindowId || !matchesLabel(it, stopLabels)
             }
             val confirmation = findClickTarget(confirmationNode) ?: return
             if (confirmation.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                completeTarget(success = true)
+                current.confirmationClicked = true
             }
             return
         }
@@ -127,10 +154,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         if (hasCancel || findLabel(root, listOf(current.target.name)) == null) return
         val stopNode = findLabel(root, stopLabels) ?: return
         val button = findClickTarget(stopNode)
-        if (button == null) {
-            completeTarget(success = false)
-            return
-        }
+        if (button == null) return
         current.appInfoWindowId = root.windowId
         if (!button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             completeTarget(success = false)
@@ -140,6 +164,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
     private fun completeTarget(success: Boolean) {
         request = null
         handler.removeCallbacks(timeout)
+        handler.removeCallbacks(poll)
         if (success) stopped++ else skipped++
         handler.postDelayed(advance, 350L)
     }
@@ -153,11 +178,14 @@ class ForceStopAccessibilityService : AccessibilityService() {
             stopped == 1 -> "تم فرض إيقاف ${target.name}."
             else -> "تعذّر فرض إيقاف ${target.name}."
         }
-        startActivity(
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(EXTRA_RESULT, message)
-        )
+        returnToController(message)
+    }
+
+    private fun returnToController(message: String? = null) {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        if (message == null) intent.putExtra(EXTRA_CONTINUE, true) else intent.putExtra(EXTRA_RESULT, message)
+        startActivity(intent)
     }
 
     private fun findLabel(root: AccessibilityNodeInfo, labels: List<String>): AccessibilityNodeInfo? {

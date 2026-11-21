@@ -218,6 +218,14 @@ class MainActivity : AppCompatActivity() {
         showStopResult()
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        if (intent.getBooleanExtra(ForceStopAccessibilityService.EXTRA_CONTINUE, false)) {
+            intent.removeExtra(ForceStopAccessibilityService.EXTRA_CONTINUE)
+            ForceStopAccessibilityService.continueQueue(this)
+        }
+    }
+
     private fun showStopResult() {
         val message = intent.getStringExtra(ForceStopAccessibilityService.EXTRA_RESULT) ?: return
         intent.removeExtra(ForceStopAccessibilityService.EXTRA_RESULT)
