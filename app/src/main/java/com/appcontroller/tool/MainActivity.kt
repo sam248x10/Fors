@@ -2,9 +2,10 @@ package com.appcontroller.tool
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
 import android.provider.Settings
 import android.text.Editable
@@ -13,45 +14,85 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
 class MainActivity : AppCompatActivity() {
 
+    private companion object {
+        val gold = Color.parseColor("#F3C969")
+        val canvas = Color.parseColor("#101010")
+        val surface = Color.parseColor("#1D1A15")
+        val border = Color.parseColor("#58472C")
+        val ivory = Color.parseColor("#FFF4DD")
+        val muted = Color.parseColor("#C8BDA8")
+
+        fun View.dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
+        fun View.rounded(fill: Int, radius: Int, outline: Int? = null) =
+            GradientDrawable().apply {
+                setColor(fill)
+                cornerRadius = dp(radius).toFloat()
+                if (outline != null) setStroke(dp(1), outline)
+            }
+
+        fun Button.style(filled: Boolean) {
+            val fill = if (filled) gold else surface
+            val text = if (filled) canvas else gold
+            val states = arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf())
+            val shape = rounded(fill, 10, if (filled) null else border).apply {
+                setColor(ColorStateList(states, intArrayOf(Color.parseColor("#29251E"), fill)))
+            }
+            backgroundTintList = null
+            background = RippleDrawable(
+                ColorStateList.valueOf(if (filled) 0x22101010 else 0x33F3C969),
+                shape,
+                null
+            )
+            setTextColor(ColorStateList(states, intArrayOf(muted, text)))
+            isAllCaps = false
+            minHeight = dp(48)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+    }
+
     private lateinit var statusBanner: TextView
     private lateinit var enableServiceBtn: Button
     private lateinit var recyclerView: RecyclerView
-    private lateinit var allApps: List<AppItem>
+    private var allApps = emptyList<AppItem>()
     private lateinit var adapter: AppsAdapter
+    private lateinit var stopSelectedBtn: Button
+    private lateinit var clearSelectionBtn: Button
+    private lateinit var searchInput: EditText
+    private val preferences by lazy { getSharedPreferences("app_selection", MODE_PRIVATE) }
+    private val selectedPackages by lazy {
+        preferences.getStringSet("selected_packages", emptySet()).orEmpty().toMutableSet()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#0B1020"))
-            setPadding(24, 24, 24, 24)
+            setBackgroundColor(canvas)
+            setPadding(dp(16), dp(16), dp(16), dp(12))
         }
 
         // شريط حالة صلاحية الوصول
         statusBanner = TextView(this).apply {
             textSize = 15f
-            setTextColor(Color.WHITE)
-            setPadding(24, 20, 24, 20)
+            setTextColor(ivory)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         root.addView(statusBanner)
 
         // زر تفعيل صلاحية إمكانية الوصول مباشرة
         enableServiceBtn = Button(this).apply {
             text = "تفعيل صلاحية إمكانية الوصول (مطلوب لفرض الإيقاف)"
-            setTextColor(Color.WHITE)
             textSize = 15f
-            isAllCaps = false
-            background = GradientDrawable(
-                GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(Color.parseColor("#7C3AED"), Color.parseColor("#2563EB"), Color.parseColor("#0D9488"))
-            )
+            style(filled = false)
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
@@ -62,13 +103,45 @@ class MainActivity : AppCompatActivity() {
         ).apply { topMargin = 16; bottomMargin = 16 }
         root.addView(enableServiceBtn, btnParams)
 
-        // حقل بحث سريع عن التطبيق (مثل X أو تويتر)
-        val searchInput = EditText(this).apply {
-            hint = "ابحث عن واتساب أو إكس..."
-            setHintTextColor(Color.parseColor("#94A3B8"))
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#162038"))
-            setPadding(24, 20, 24, 20)
+        val selectionActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, dp(10))
+        }
+        stopSelectedBtn = Button(this).apply {
+            style(filled = true)
+            setOnClickListener {
+                triggerForceStop(allApps.filter { it.packageName in selectedPackages })
+            }
+        }
+        clearSelectionBtn = Button(this).apply {
+            text = "إلغاء التحديد"
+            style(filled = false)
+            setOnClickListener {
+                selectedPackages.clear()
+                saveSelection()
+                adapter.notifyDataSetChanged()
+            }
+        }
+        selectionActions.addView(
+            stopSelectedBtn,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = selectionActions.dp(8)
+            }
+        )
+        selectionActions.addView(
+            clearSelectionBtn,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        root.addView(selectionActions)
+
+        // البحث بالاسم أو اسم الحزمة
+        searchInput = EditText(this).apply {
+            hint = "ابحث عن تطبيق..."
+            setHintTextColor(muted)
+            setTextColor(ivory)
+            background = rounded(surface, 12, border)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            isSingleLine = true
             textSize = 15f
         }
         val searchParams = LinearLayout.LayoutParams(
@@ -77,10 +150,14 @@ class MainActivity : AppCompatActivity() {
         ).apply { bottomMargin = 16 }
         root.addView(searchInput, searchParams)
 
-        allApps = loadInstalledApps()
         adapter = AppsAdapter(
-            allApps.toMutableList(),
-            onForceStop = { app -> triggerForceStop(app) },
+            mutableListOf(),
+            isSelected = { it.packageName in selectedPackages },
+            onSelectionChanged = { app, checked ->
+                if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
+                saveSelection()
+            },
+            onForceStop = { app -> triggerForceStop(listOf(app)) },
             onLaunch = { app -> triggerLaunch(app) }
         )
 
@@ -96,15 +173,7 @@ class MainActivity : AppCompatActivity() {
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                val query = s?.toString()?.trim()?.lowercase() ?: ""
-                val filtered = if (query.isEmpty()) {
-                    allApps
-                } else {
-                    allApps.filter {
-                        it.name.lowercase().contains(query) || it.packageName.lowercase().contains(query)
-                    }
-                }
-                adapter.updateList(filtered)
+                filterApps()
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -114,19 +183,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        ForceStopAccessibilityService.clear()
+        allApps = loadInstalledApps()
+        filterApps()
+        updateSelectionActions()
+        showStopResult()
         updateServiceStatusUI()
     }
 
     private fun updateServiceStatusUI() {
         val enabled = isAccessibilityServiceEnabled()
         if (enabled) {
-            statusBanner.text = "إمكانية الوصول مفعّلة. يمكنك إيقاف واتساب وإكس أو تشغيلهما."
-            statusBanner.setBackgroundColor(Color.parseColor("#0F766E"))
+            statusBanner.text = "إمكانية الوصول مفعّلة. يمكنك إيقاف التطبيقات المحددة."
+            statusBanner.background = statusBanner.rounded(surface, 12, border)
             enableServiceBtn.visibility = View.GONE
         } else {
             statusBanner.text = "الحالة: صلاحية إمكانية الوصول غير مفعّلة بعد"
-            statusBanner.setBackgroundColor(Color.parseColor("#991B1B"))
+            statusBanner.background = statusBanner.rounded(Color.parseColor("#322617"), 12, gold)
             enableServiceBtn.visibility = View.VISIBLE
         }
     }
@@ -140,30 +212,54 @@ class MainActivity : AppCompatActivity() {
         return enabledServices.split(":").any { it.equals(expectedComponent, ignoreCase = true) }
     }
 
-    private fun triggerForceStop(app: AppItem) {
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        showStopResult()
+    }
+
+    private fun showStopResult() {
+        val message = intent.getStringExtra(ForceStopAccessibilityService.EXTRA_RESULT) ?: return
+        intent.removeExtra(ForceStopAccessibilityService.EXTRA_RESULT)
+        AlertDialog.Builder(this)
+            .setTitle("نتيجة الإيقاف")
+            .setMessage(message)
+            .setPositiveButton("تم", null)
+            .show()
+            .apply {
+                window?.setBackgroundDrawable(statusBanner.rounded(surface, 16, border))
+                getButton(AlertDialog.BUTTON_POSITIVE).style(filled = true)
+            }
+    }
+
+    private fun saveSelection() {
+        preferences.edit().putStringSet("selected_packages", selectedPackages.toSet()).apply()
+        updateSelectionActions()
+    }
+
+    private fun updateSelectionActions() {
+        val count = allApps.count { it.packageName in selectedPackages }
+        stopSelectedBtn.text = "إيقاف المحدد ($count)"
+        stopSelectedBtn.isEnabled = count > 0
+        clearSelectionBtn.isEnabled = selectedPackages.isNotEmpty()
+    }
+
+    private fun filterApps() {
+        val query = searchInput.text.toString().trim().lowercase()
+        adapter.updateList(allApps.filter {
+            it.name.lowercase().contains(query) || it.packageName.lowercase().contains(query)
+        })
+    }
+
+    private fun triggerForceStop(apps: List<AppItem>) {
         if (!isAccessibilityServiceEnabled()) {
             Toast.makeText(this, "فعّل صلاحية إمكانية الوصول أولاً", Toast.LENGTH_SHORT).show()
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             return
         }
 
-        val intent = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.fromParts("package", app.packageName, null)
-        )
-        val settingsPackage = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
-            ?.activityInfo?.packageName
-        if (settingsPackage == null) {
-            Toast.makeText(this, "تعذّر فتح إعدادات التطبيق", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        ForceStopAccessibilityService.prepare(app, settingsPackage)
-        try {
-            startActivity(intent.setPackage(settingsPackage))
-        } catch (_: android.content.ActivityNotFoundException) {
-            ForceStopAccessibilityService.clear()
-            Toast.makeText(this, "تعذّر فتح إعدادات التطبيق", Toast.LENGTH_SHORT).show()
+        if (!ForceStopAccessibilityService.enqueue(this, apps)) {
+            Toast.makeText(this, "تعذّر بدء الإيقاف. انتظر انتهاء العملية أو تحقق من تفعيل الخدمة.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -179,10 +275,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadInstalledApps(): List<AppItem> {
         val pm = packageManager
-        val supportedPackages = setOf("com.whatsapp", "com.twitter.android")
-        val packages = pm.getInstalledApplications(0)
-        return packages
-            .filter { it.packageName in supportedPackages && pm.getLaunchIntentForPackage(it.packageName) != null }
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return pm.queryIntentActivities(launcherIntent, 0)
+            .map { it.activityInfo.applicationInfo }
+            .distinctBy { it.packageName }
+            .filter { it.packageName != packageName }
             .map { appInfo ->
                 AppItem(
                     name = pm.getApplicationLabel(appInfo).toString(),
@@ -195,11 +292,14 @@ class MainActivity : AppCompatActivity() {
 
     private class AppsAdapter(
         private val items: MutableList<AppItem>,
+        private val isSelected: (AppItem) -> Boolean,
+        private val onSelectionChanged: (AppItem, Boolean) -> Unit,
         private val onForceStop: (AppItem) -> Unit,
         private val onLaunch: (AppItem) -> Unit
     ) : RecyclerView.Adapter<AppsAdapter.AppViewHolder>() {
 
         class AppViewHolder(val row: LinearLayout) : RecyclerView.ViewHolder(row) {
+            lateinit var selection: CheckBox
             lateinit var iconView: ImageView
             lateinit var nameView: TextView
             lateinit var stopBtn: Button
@@ -215,24 +315,31 @@ class MainActivity : AppCompatActivity() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AppViewHolder {
             val ctx = parent.context
             val row = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setBackgroundColor(Color.parseColor("#131C31"))
-                setPadding(18, 16, 18, 16)
+                orientation = LinearLayout.VERTICAL
+                background = rounded(surface, 14, border)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
                 layoutParams = RecyclerView.LayoutParams(
                     RecyclerView.LayoutParams.MATCH_PARENT,
                     RecyclerView.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = 12 }
+                ).apply { bottomMargin = dp(8) }
+            }
+            val appDetails = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val appActions = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
             }
 
             val iconView = ImageView(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(84, 84)
+                layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
             }
 
             val nameView = TextView(ctx).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(ivory)
                 textSize = 15f
-                setPadding(16, 0, 12, 0)
+                setPaddingRelative(dp(10), 0, dp(6), 0)
                 maxLines = 1
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
@@ -240,33 +347,34 @@ class MainActivity : AppCompatActivity() {
             val stopBtn = Button(ctx).apply {
                 text = "إيقاف"
                 textSize = 13f
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#DC2626"))
-                isAllCaps = false
+                style(filled = false)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { rightMargin = 8 }
+                ).apply { marginEnd = dp(8) }
             }
 
             val launchBtn = Button(ctx).apply {
                 text = "تشغيل"
                 textSize = 13f
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#0D9488"))
-                isAllCaps = false
+                style(filled = true)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             }
 
-            row.addView(iconView)
-            row.addView(nameView)
-            row.addView(stopBtn)
-            row.addView(launchBtn)
+            val selection = CheckBox(ctx)
+            appDetails.addView(selection)
+            appDetails.addView(iconView)
+            appDetails.addView(nameView)
+            appActions.addView(stopBtn)
+            appActions.addView(launchBtn)
+            row.addView(appDetails)
+            row.addView(appActions)
 
             return AppViewHolder(row).apply {
+                this.selection = selection
                 this.iconView = iconView
                 this.nameView = nameView
                 this.stopBtn = stopBtn
@@ -276,6 +384,10 @@ class MainActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: AppViewHolder, position: Int) {
             val item = items[position]
+            holder.selection.setOnCheckedChangeListener(null)
+            holder.selection.isChecked = isSelected(item)
+            holder.selection.contentDescription = "تحديد ${item.name}"
+            holder.selection.setOnCheckedChangeListener { _, checked -> onSelectionChanged(item, checked) }
             holder.iconView.setImageDrawable(item.icon)
             holder.nameView.text = item.name
             holder.stopBtn.setOnClickListener { onForceStop(item) }
