@@ -1,11 +1,13 @@
 package com.appcontroller.tool
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.text.Editable
@@ -66,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stopSelectedBtn: Button
     private lateinit var clearSelectionBtn: Button
     private lateinit var searchInput: EditText
+    private var showSelectedOnly = false
     private val preferences by lazy { getSharedPreferences("app_selection", MODE_PRIVATE) }
     private val selectedPackages by lazy {
         preferences.getStringSet("selected_packages", emptySet()).orEmpty().toMutableSet()
@@ -87,6 +90,19 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         root.addView(statusBanner)
+
+        val settingsButton = Button(this).apply {
+            text = "الإعدادات"
+            style(filled = false)
+            setOnClickListener { showAppSettings() }
+        }
+        root.addView(settingsButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.END
+            topMargin = settingsButton.dp(8)
+        })
 
         // زر تفعيل صلاحية إمكانية الوصول مباشرة
         enableServiceBtn = Button(this).apply {
@@ -119,7 +135,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 selectedPackages.clear()
                 saveSelection()
-                adapter.notifyDataSetChanged()
+                filterApps()
             }
         }
         selectionActions.addView(
@@ -144,11 +160,26 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
             textSize = 15f
         }
-        val searchParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { bottomMargin = 16 }
-        root.addView(searchInput, searchParams)
+        val filterButton = Button(this).apply {
+            text = "المحدد"
+            style(filled = false)
+            setOnClickListener {
+                showSelectedOnly = !showSelectedOnly
+                text = if (showSelectedOnly) "عرض الكل" else "المحدد"
+                style(filled = showSelectedOnly)
+                filterApps()
+            }
+        }
+        val searchRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+            addView(searchInput, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(filterButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(8) })
+        }
+        root.addView(searchRow)
 
         adapter = AppsAdapter(
             mutableListOf(),
@@ -156,6 +187,7 @@ class MainActivity : AppCompatActivity() {
             onSelectionChanged = { app, checked ->
                 if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
                 saveSelection()
+                if (showSelectedOnly) filterApps()
             },
             onForceStop = { app -> triggerForceStop(listOf(app)) },
             onLaunch = { app -> triggerLaunch(app) }
@@ -226,6 +258,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showAppSettings() {
+        val version = packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+        AlertDialog.Builder(this)
+            .setTitle("إعدادات التطبيق")
+            .setMessage("الإصدار $version")
+            .setPositiveButton("فتح موقع SameerLab") { _, _ ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://sameerlab.com")))
+                } catch (_: ActivityNotFoundException) {
+                    Toast.makeText(this, "لا يوجد متصفح لفتح الموقع", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("إغلاق", null)
+            .show()
+            .apply {
+                window?.setBackgroundDrawable(statusBanner.rounded(surface, 16, border))
+                getButton(AlertDialog.BUTTON_POSITIVE).style(filled = true)
+            }
+    }
+
     private fun showStopResult() {
         val message = intent.getStringExtra(ForceStopAccessibilityService.EXTRA_RESULT) ?: return
         intent.removeExtra(ForceStopAccessibilityService.EXTRA_RESULT)
@@ -255,7 +307,8 @@ class MainActivity : AppCompatActivity() {
     private fun filterApps() {
         val query = searchInput.text.toString().trim().lowercase()
         adapter.updateList(allApps.filter {
-            it.name.lowercase().contains(query) || it.packageName.lowercase().contains(query)
+            (!showSelectedOnly || it.packageName in selectedPackages) &&
+                (it.name.lowercase().contains(query) || it.packageName.lowercase().contains(query))
         })
     }
 

@@ -13,6 +13,7 @@
     </queries>
 
     <application
+        android:icon="@drawable/ic_app_controller"
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"

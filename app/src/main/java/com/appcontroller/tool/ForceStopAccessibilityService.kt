@@ -22,6 +22,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         val settingsPackage: String,
         val openedAt: Long,
         var appInfoWindowId: Int? = null,
+        var stopClicked: Boolean = false,
         var confirmationClicked: Boolean = false
     )
 
@@ -60,7 +61,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         if (current != null) {
             val reason = when {
                 current.confirmationClicked -> "لم يؤكّد أندرويد أن التطبيق أصبح موقوفًا"
-                current.appInfoWindowId != null -> "لم تُلتقط نافذة التأكيد"
+                current.stopClicked -> "لم تُلتقط نافذة التأكيد"
                 else -> "زر فرض الإيقاف غير متاح أو لم يظهر"
             }
             failures.add("${current.target.name}: $reason")
@@ -77,6 +78,18 @@ class ForceStopAccessibilityService : AccessibilityService() {
     private val advance = Runnable {
         if (queue.isEmpty()) finishQueue() else returnToController()
     }
+    private val closeSettings = Runnable {
+        val current = requestToClose
+        requestToClose = null
+        val root = rootInActiveWindow
+        val settingsStillOpen = current != null && root != null &&
+            root.packageName?.toString() == current.settingsPackage &&
+            (root.windowId == current.appInfoWindowId ||
+                findLabel(root, listOf(current.target.name)) != null)
+        if (settingsStillOpen) performGlobalAction(GLOBAL_ACTION_BACK)
+        handler.postDelayed(advance, 350L)
+    }
+    private var requestToClose: Request? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -151,7 +164,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
         if (root.packageName?.toString() != current.settingsPackage) return
         val hasCancel = findLabel(root, cancelLabels) != null ||
             root.findAccessibilityNodeInfosByViewId("android:id/button2").orEmpty().any { it.isVisibleToUser }
-        if (current.appInfoWindowId != null) {
+        if (current.stopClicked) {
             if (!hasCancel) return
             val positiveButton = root.findAccessibilityNodeInfosByViewId("android:id/button1")
                 .orEmpty().firstOrNull { it.isVisibleToUser && matchesLabel(it, confirmationLabels) }
@@ -171,21 +184,23 @@ class ForceStopAccessibilityService : AccessibilityService() {
         }
 
         if (hasCancel || findLabel(root, listOf(current.target.name)) == null) return
+        current.appInfoWindowId = root.windowId
         val stopNode = findLabel(root, stopLabels) ?: return
         val button = findClickTarget(stopNode)
         if (button == null) return
-        current.appInfoWindowId = root.windowId
+        current.stopClicked = true
         if (!button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             completeTarget(success = false)
         }
     }
 
     private fun completeTarget(success: Boolean) {
+        requestToClose = request
         request = null
         handler.removeCallbacks(timeout)
         handler.removeCallbacks(poll)
         if (success) stopped++ else skipped++
-        handler.postDelayed(advance, 350L)
+        handler.postDelayed(closeSettings, 350L)
     }
 
     private fun finishQueue() {
@@ -236,6 +251,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {
         if (!running) return
         handler.removeCallbacksAndMessages(null)
+        requestToClose = null
         skipped += queue.size + if (request != null) 1 else 0
         queue.clear()
         request = null
