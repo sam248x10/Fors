@@ -20,6 +20,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,7 +42,7 @@ class MainActivity : AppCompatActivity() {
                 if (outline != null) setStroke(dp(1), outline)
             }
 
-        fun Button.style(filled: Boolean) {
+        fun Button.style(filled: Boolean, compact: Boolean = false) {
             val fill = if (filled) gold else surface
             val text = if (filled) canvas else gold
             val states = arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf())
@@ -56,7 +58,8 @@ class MainActivity : AppCompatActivity() {
             setTextColor(ColorStateList(states, intArrayOf(muted, text)))
             isAllCaps = false
             minHeight = dp(48)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            val horizontalPadding = dp(if (compact) 4 else 12)
+            setPadding(horizontalPadding, dp(8), horizontalPadding, dp(8))
         }
     }
 
@@ -83,6 +86,26 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16), dp(16), dp(16), dp(12))
         }
 
+        val header = LinearLayout(this).apply {
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(10))
+            val settingsButton = ImageButton(context).apply {
+                contentDescription = "الإعدادات"
+                setImageResource(R.drawable.ic_settings)
+                background = RippleDrawable(ColorStateList.valueOf(0x33F3C969), rounded(surface, 10, border), null)
+                setOnClickListener { showAppSettings() }
+            }
+            addView(settingsButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(Button(context).apply {
+                text = "المجموعات"
+                style(filled = false)
+                setOnClickListener { showGroups() }
+            })
+        }
+        root.addView(header)
+
         // شريط حالة صلاحية الوصول
         statusBanner = TextView(this).apply {
             textSize = 15f
@@ -90,19 +113,6 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         root.addView(statusBanner)
-
-        val settingsButton = Button(this).apply {
-            text = "الإعدادات"
-            style(filled = false)
-            setOnClickListener { showAppSettings() }
-        }
-        root.addView(settingsButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.END
-            topMargin = settingsButton.dp(8)
-        })
 
         // زر تفعيل صلاحية إمكانية الوصول مباشرة
         enableServiceBtn = Button(this).apply {
@@ -124,32 +134,20 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(10), 0, dp(10))
         }
         stopSelectedBtn = Button(this).apply {
-            style(filled = true)
+            style(filled = true, compact = true)
             setOnClickListener {
                 triggerForceStop(allApps.filter { it.packageName in selectedPackages })
             }
         }
         clearSelectionBtn = Button(this).apply {
             text = "إلغاء التحديد"
-            style(filled = false)
+            style(filled = false, compact = true)
             setOnClickListener {
                 selectedPackages.clear()
                 saveSelection()
                 filterApps()
             }
         }
-        selectionActions.addView(
-            stopSelectedBtn,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = selectionActions.dp(8)
-            }
-        )
-        selectionActions.addView(
-            clearSelectionBtn,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
-        root.addView(selectionActions)
-
         // البحث بالاسم أو اسم الحزمة
         searchInput = EditText(this).apply {
             hint = "ابحث عن تطبيق..."
@@ -161,25 +159,26 @@ class MainActivity : AppCompatActivity() {
             textSize = 15f
         }
         val filterButton = Button(this).apply {
-            text = "المحدد"
-            style(filled = false)
+            text = "عرض المحدد"
+            style(filled = false, compact = true)
             setOnClickListener {
                 showSelectedOnly = !showSelectedOnly
-                text = if (showSelectedOnly) "عرض الكل" else "المحدد"
-                style(filled = showSelectedOnly)
+                text = if (showSelectedOnly) "عرض الكل" else "عرض المحدد"
+                style(filled = showSelectedOnly, compact = true)
                 filterApps()
             }
         }
-        val searchRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(12))
-            addView(searchInput, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(filterButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { marginStart = dp(8) })
+        listOf(filterButton, clearSelectionBtn, stopSelectedBtn).forEachIndexed { index, button ->
+            button.textSize = 12f
+            selectionActions.addView(button, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                if (index < 2) marginEnd = selectionActions.dp(6)
+            })
         }
-        root.addView(searchRow)
+        root.addView(selectionActions)
+        root.addView(searchInput, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = searchInput.dp(12) })
 
         adapter = AppsAdapter(
             mutableListOf(),
@@ -255,6 +254,62 @@ class MainActivity : AppCompatActivity() {
         if (intent.getBooleanExtra(ForceStopAccessibilityService.EXTRA_CONTINUE, false)) {
             intent.removeExtra(ForceStopAccessibilityService.EXTRA_CONTINUE)
             ForceStopAccessibilityService.continueQueue(this)
+        }
+    }
+
+    private fun showGroups() {
+        val groups = JSONObject(preferences.getString("app_groups", "{}") ?: "{}")
+        val names = groups.keys().asSequence().sorted().toList()
+        val selected = allApps.filter { it.packageName in selectedPackages }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("المجموعات")
+            .setNegativeButton("إغلاق", null)
+            .setNeutralButton("حفظ المحدد كمجموعة") { _, _ -> saveGroup(groups, selected) }
+        if (names.isEmpty()) {
+            dialog.setMessage("حدد التطبيقات التي تريد جمعها، ثم احفظها باسم مجموعة.")
+        } else {
+            dialog.setItems(names.toTypedArray()) { _, index ->
+                val name = names[index]
+                val packages = groups.getJSONArray(name)
+                val members = (0 until packages.length()).map { packages.getString(it) }.toSet()
+                val apps = allApps.filter { it.packageName in members }
+                AlertDialog.Builder(this)
+                    .setTitle(name)
+                    .setMessage(if (apps.isEmpty()) "لا توجد تطبيقات مثبّتة في هذه المجموعة."
+                        else apps.joinToString("\n") { it.name })
+                    .setPositiveButton("إيقاف المجموعة") { _, _ -> triggerForceStop(apps) }
+                    .setNegativeButton("إغلاق", null)
+                    .show()
+                    .getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = apps.isNotEmpty()
+            }
+        }
+        dialog.show().getButton(AlertDialog.BUTTON_NEUTRAL).isEnabled = selected.isNotEmpty()
+    }
+
+    private fun saveGroup(groups: JSONObject, apps: List<AppItem>) {
+        val input = EditText(this).apply {
+            hint = "مثال: ألعاب"
+            isSingleLine = true
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("اسم المجموعة")
+            .setView(input)
+            .setPositiveButton("حفظ", null)
+            .setNegativeButton("إلغاء", null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = input.text.toString().trim()
+            when {
+                name.isEmpty() -> input.error = "أدخل اسم المجموعة"
+                groups.has(name) -> input.error = "يوجد مجموعة بهذا الاسم"
+                else -> {
+                    groups.put(name, JSONArray(apps.map { it.packageName }))
+                    preferences.edit().putString("app_groups", groups.toString()).apply()
+                    dialog.dismiss()
+                    showGroups()
+                }
+            }
         }
     }
 
