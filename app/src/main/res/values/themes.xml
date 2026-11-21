@@ -1,9 +1,9 @@
 <resources>
-    <style name="Theme.AppController" parent="Theme.AppCompat.NoActionBar">
-        <item name="colorPrimary">#1D1A15</item>
-        <item name="colorPrimaryDark">#101010</item>
-        <item name="colorAccent">#F3C969</item>
-        <item name="android:windowBackground">#101010</item>
-        <item name="android:navigationBarColor">#101010</item>
+    <style name="Theme.AppController" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/app_surface</item>
+        <item name="colorPrimaryDark">@color/app_canvas</item>
+        <item name="colorAccent">@color/app_gold</item>
+        <item name="android:windowBackground">@color/app_canvas</item>
+        <item name="android:navigationBarColor">@color/app_canvas</item>
     </style>
 </resources>

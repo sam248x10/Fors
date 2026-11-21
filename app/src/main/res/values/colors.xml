@@ -1,0 +1,9 @@
+<resources>
+    <color name="app_gold">#79530C</color>
+    <color name="app_canvas">#FAF6ED</color>
+    <color name="app_surface">#FFFFFF</color>
+    <color name="app_border">#DED1B7</color>
+    <color name="app_text">#241B0F</color>
+    <color name="app_muted">#655744</color>
+    <color name="app_disabled">#EEE7DA</color>
+</resources>

@@ -4,7 +4,6 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -12,12 +11,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import org.json.JSONArray
@@ -26,12 +27,12 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private companion object {
-        val gold = Color.parseColor("#F3C969")
-        val canvas = Color.parseColor("#101010")
-        val surface = Color.parseColor("#1D1A15")
-        val border = Color.parseColor("#58472C")
-        val ivory = Color.parseColor("#FFF4DD")
-        val muted = Color.parseColor("#C8BDA8")
+        val View.gold get() = context.getColor(R.color.app_gold)
+        val View.canvas get() = context.getColor(R.color.app_canvas)
+        val View.surface get() = context.getColor(R.color.app_surface)
+        val View.border get() = context.getColor(R.color.app_border)
+        val View.ivory get() = context.getColor(R.color.app_text)
+        val View.muted get() = context.getColor(R.color.app_muted)
 
         fun View.dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -47,7 +48,7 @@ class MainActivity : AppCompatActivity() {
             val text = if (filled) canvas else gold
             val states = arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf())
             val shape = rounded(fill, 10, if (filled) null else border).apply {
-                setColor(ColorStateList(states, intArrayOf(Color.parseColor("#29251E"), fill)))
+                setColor(ColorStateList(states, intArrayOf(context.getColor(R.color.app_disabled), fill)))
             }
             backgroundTintList = null
             background = RippleDrawable(
@@ -78,6 +79,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        delegate.localNightMode = if (preferences.getBoolean("dark_mode", true)) {
+            AppCompatDelegate.MODE_NIGHT_YES
+        } else {
+            AppCompatDelegate.MODE_NIGHT_NO
+        }
         super.onCreate(savedInstanceState)
 
         val root = LinearLayout(this).apply {
@@ -93,6 +99,7 @@ class MainActivity : AppCompatActivity() {
             val settingsButton = ImageButton(context).apply {
                 contentDescription = "الإعدادات"
                 setImageResource(R.drawable.ic_settings)
+                imageTintList = ColorStateList.valueOf(gold)
                 background = RippleDrawable(ColorStateList.valueOf(0x33F3C969), rounded(surface, 10, border), null)
                 setOnClickListener { showAppSettings() }
             }
@@ -143,6 +150,7 @@ class MainActivity : AppCompatActivity() {
             text = "إلغاء التحديد"
             style(filled = false, compact = true)
             setOnClickListener {
+                preferences.edit().remove("active_group").apply()
                 selectedPackages.clear()
                 saveSelection()
                 filterApps()
@@ -185,11 +193,10 @@ class MainActivity : AppCompatActivity() {
             isSelected = { it.packageName in selectedPackages },
             onSelectionChanged = { app, checked ->
                 if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
-                saveSelection()
+                saveSelection(updateGroup = true)
                 if (showSelectedOnly) filterApps()
             },
-            onForceStop = { app -> triggerForceStop(listOf(app)) },
-            onLaunch = { app -> triggerLaunch(app) }
+            onForceStop = { app -> triggerForceStop(listOf(app)) }
         )
 
         recyclerView = RecyclerView(this).apply {
@@ -223,14 +230,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateServiceStatusUI() {
         val enabled = isAccessibilityServiceEnabled()
-        if (enabled) {
-            statusBanner.text = "إمكانية الوصول مفعّلة. يمكنك إيقاف التطبيقات المحددة."
-            statusBanner.background = statusBanner.rounded(surface, 12, border)
-            enableServiceBtn.visibility = View.GONE
-        } else {
-            statusBanner.text = "الحالة: صلاحية إمكانية الوصول غير مفعّلة بعد"
-            statusBanner.background = statusBanner.rounded(Color.parseColor("#322617"), 12, gold)
-            enableServiceBtn.visibility = View.VISIBLE
+        statusBanner.visibility = if (enabled) View.GONE else View.VISIBLE
+        enableServiceBtn.visibility = statusBanner.visibility
+        if (!enabled) {
+            statusBanner.text = "فعّل خدمة إمكانية الوصول لاستخدام فرض الإيقاف."
+            statusBanner.background = statusBanner.rounded(statusBanner.surface, 12, statusBanner.border)
         }
     }
 
@@ -258,7 +262,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showGroups() {
-        val groups = JSONObject(preferences.getString("app_groups", "{}") ?: "{}")
+        val groups = loadGroups()
         val names = groups.keys().asSequence().sorted().toList()
         val selected = allApps.filter { it.packageName in selectedPackages }
         val dialog = AlertDialog.Builder(this)
@@ -268,22 +272,41 @@ class MainActivity : AppCompatActivity() {
         if (names.isEmpty()) {
             dialog.setMessage("حدد التطبيقات التي تريد جمعها، ثم احفظها باسم مجموعة.")
         } else {
+            dialog.setPositiveButton("حذف مجموعة") { _, _ -> showDeleteGroup(groups, names) }
             dialog.setItems(names.toTypedArray()) { _, index ->
                 val name = names[index]
                 val packages = groups.getJSONArray(name)
-                val members = (0 until packages.length()).map { packages.getString(it) }.toSet()
-                val apps = allApps.filter { it.packageName in members }
-                AlertDialog.Builder(this)
-                    .setTitle(name)
-                    .setMessage(if (apps.isEmpty()) "لا توجد تطبيقات مثبّتة في هذه المجموعة."
-                        else apps.joinToString("\n") { it.name })
-                    .setPositiveButton("إيقاف المجموعة") { _, _ -> triggerForceStop(apps) }
-                    .setNegativeButton("إغلاق", null)
-                    .show()
-                    .getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = apps.isNotEmpty()
+                selectedPackages.clear()
+                selectedPackages.addAll((0 until packages.length()).map { packages.getString(it) })
+                preferences.edit().putString("active_group", name).apply()
+                saveSelection()
+                filterApps()
             }
         }
         dialog.show().getButton(AlertDialog.BUTTON_NEUTRAL).isEnabled = selected.isNotEmpty()
+    }
+
+    private fun loadGroups() = JSONObject(preferences.getString("app_groups", "{}") ?: "{}")
+
+    private fun showDeleteGroup(groups: JSONObject, names: List<String>) {
+        AlertDialog.Builder(this)
+            .setTitle("اختر المجموعة المراد حذفها")
+            .setItems(names.toTypedArray()) { _, index ->
+                val name = names[index]
+                AlertDialog.Builder(this)
+                    .setTitle("حذف مجموعة «$name»؟")
+                    .setNegativeButton("إلغاء", null)
+                    .setPositiveButton("حذف") { _, _ ->
+                        groups.remove(name)
+                        val edit = preferences.edit().putString("app_groups", groups.toString())
+                        if (preferences.getString("active_group", null) == name) edit.remove("active_group")
+                        edit.apply()
+                        showGroups()
+                    }
+                    .show()
+            }
+            .setNegativeButton("إلغاء", null)
+            .show()
     }
 
     private fun saveGroup(groups: JSONObject, apps: List<AppItem>) {
@@ -305,7 +328,10 @@ class MainActivity : AppCompatActivity() {
                 groups.has(name) -> input.error = "يوجد مجموعة بهذا الاسم"
                 else -> {
                     groups.put(name, JSONArray(apps.map { it.packageName }))
-                    preferences.edit().putString("app_groups", groups.toString()).apply()
+                    preferences.edit()
+                        .putString("app_groups", groups.toString())
+                        .putString("active_group", name)
+                        .apply()
                     dialog.dismiss()
                     showGroups()
                 }
@@ -315,10 +341,40 @@ class MainActivity : AppCompatActivity() {
 
     private fun showAppSettings() {
         val version = packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+        val details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+            addView(TextView(context).apply {
+                text = "الإصدار $version"
+                setTextColor(gold)
+                textSize = 14f
+            })
+            addView(TextView(context).apply {
+                text = "عن التطبيق"
+                setTextColor(ivory)
+                textSize = 18f
+                setPadding(0, dp(16), 0, dp(6))
+            })
+            addView(TextView(context).apply {
+                text = "ابحث عن تطبيقاتك، واحفظها في مجموعات، وأوقف تطبيقًا واحدًا أو عدة تطبيقات عبر خدمة إمكانية الوصول."
+                setTextColor(muted)
+                textSize = 15f
+            })
+            addView(Switch(context).apply {
+                text = "الوضع الداكن"
+                isChecked = preferences.getBoolean("dark_mode", true)
+                minHeight = dp(52)
+                setOnCheckedChangeListener { _, checked ->
+                    preferences.edit().putBoolean("dark_mode", checked).apply()
+                    delegate.localNightMode = if (checked) AppCompatDelegate.MODE_NIGHT_YES
+                        else AppCompatDelegate.MODE_NIGHT_NO
+                }
+            })
+        }
         AlertDialog.Builder(this)
             .setTitle("إعدادات التطبيق")
-            .setMessage("الإصدار $version")
-            .setPositiveButton("فتح موقع SameerLab") { _, _ ->
+            .setView(details)
+            .setPositiveButton("المطور Sameer LAB") { _, _ ->
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://sameerlab.com")))
                 } catch (_: ActivityNotFoundException) {
@@ -328,7 +384,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("إغلاق", null)
             .show()
             .apply {
-                window?.setBackgroundDrawable(statusBanner.rounded(surface, 16, border))
+                window?.setBackgroundDrawable(statusBanner.rounded(statusBanner.surface, 16, statusBanner.border))
                 getButton(AlertDialog.BUTTON_POSITIVE).style(filled = true)
             }
     }
@@ -342,13 +398,21 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("تم", null)
             .show()
             .apply {
-                window?.setBackgroundDrawable(statusBanner.rounded(surface, 16, border))
+                window?.setBackgroundDrawable(statusBanner.rounded(statusBanner.surface, 16, statusBanner.border))
                 getButton(AlertDialog.BUTTON_POSITIVE).style(filled = true)
             }
     }
 
-    private fun saveSelection() {
-        preferences.edit().putStringSet("selected_packages", selectedPackages.toSet()).apply()
+    private fun saveSelection(updateGroup: Boolean = false) {
+        val selection = selectedPackages.toSet()
+        val edit = preferences.edit().putStringSet("selected_packages", selection)
+        val group = if (updateGroup) preferences.getString("active_group", null) else null
+        if (group != null) {
+            val groups = loadGroups()
+            groups.put(group, JSONArray(selection.toList()))
+            edit.putString("app_groups", groups.toString())
+        }
+        edit.apply()
         updateSelectionActions()
     }
 
@@ -379,16 +443,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun triggerLaunch(app: AppItem) {
-        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
-        if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(launchIntent)
-        } else {
-            Toast.makeText(this, "لا يمكن تشغيل هذا التطبيق مباشرة", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun loadInstalledApps(): List<AppItem> {
         val pm = packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -410,16 +464,14 @@ class MainActivity : AppCompatActivity() {
         private val items: MutableList<AppItem>,
         private val isSelected: (AppItem) -> Boolean,
         private val onSelectionChanged: (AppItem, Boolean) -> Unit,
-        private val onForceStop: (AppItem) -> Unit,
-        private val onLaunch: (AppItem) -> Unit
+        private val onForceStop: (AppItem) -> Unit
     ) : RecyclerView.Adapter<AppsAdapter.AppViewHolder>() {
 
         class AppViewHolder(val row: LinearLayout) : RecyclerView.ViewHolder(row) {
             lateinit var selection: CheckBox
             lateinit var iconView: ImageView
             lateinit var nameView: TextView
-            lateinit var stopBtn: Button
-            lateinit var launchBtn: Button
+            lateinit var stopBtn: ImageButton
         }
 
         fun updateList(newList: List<AppItem>) {
@@ -431,23 +483,16 @@ class MainActivity : AppCompatActivity() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AppViewHolder {
             val ctx = parent.context
             val row = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                gravity = Gravity.CENTER_VERTICAL
                 background = rounded(surface, 14, border)
-                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setPadding(dp(4), 0, dp(4), 0)
                 layoutParams = RecyclerView.LayoutParams(
                     RecyclerView.LayoutParams.MATCH_PARENT,
                     RecyclerView.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(8) }
             }
-            val appDetails = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val appActions = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END
-            }
-
             val iconView = ImageView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
             }
@@ -457,44 +502,28 @@ class MainActivity : AppCompatActivity() {
                 textSize = 15f
                 setPaddingRelative(dp(10), 0, dp(6), 0)
                 maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
 
-            val stopBtn = Button(ctx).apply {
-                text = "إيقاف"
-                textSize = 13f
-                style(filled = false)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { marginEnd = dp(8) }
-            }
-
-            val launchBtn = Button(ctx).apply {
-                text = "تشغيل"
-                textSize = 13f
-                style(filled = true)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+            val stopBtn = ImageButton(ctx).apply {
+                setImageResource(R.drawable.ic_stop)
+                imageTintList = ColorStateList.valueOf(gold)
+                background = RippleDrawable(ColorStateList.valueOf(0x33F3C969), rounded(canvas, 10, border), null)
+                layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
             }
 
             val selection = CheckBox(ctx)
-            appDetails.addView(selection)
-            appDetails.addView(iconView)
-            appDetails.addView(nameView)
-            appActions.addView(stopBtn)
-            appActions.addView(launchBtn)
-            row.addView(appDetails)
-            row.addView(appActions)
+            row.addView(selection)
+            row.addView(iconView)
+            row.addView(nameView)
+            row.addView(stopBtn)
 
             return AppViewHolder(row).apply {
                 this.selection = selection
                 this.iconView = iconView
                 this.nameView = nameView
                 this.stopBtn = stopBtn
-                this.launchBtn = launchBtn
             }
         }
 
@@ -506,8 +535,9 @@ class MainActivity : AppCompatActivity() {
             holder.selection.setOnCheckedChangeListener { _, checked -> onSelectionChanged(item, checked) }
             holder.iconView.setImageDrawable(item.icon)
             holder.nameView.text = item.name
+            holder.stopBtn.contentDescription = "فرض إيقاف "
             holder.stopBtn.setOnClickListener { onForceStop(item) }
-            holder.launchBtn.setOnClickListener { onLaunch(item) }
+
         }
 
         override fun getItemCount(): Int = items.size
