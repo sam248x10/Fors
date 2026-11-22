@@ -12,9 +12,11 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.TextUtils
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -75,6 +77,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var updateBanner: Button
     private var availableVersion: String? = null
     private var checkingUpdate = false
+    private lateinit var mainContent: View
+    private val appLock by lazy { AppLock(this) }
+    private var appUnlocked = false
+    private var unlockDialog: AlertDialog? = null
+    private val openDialogs = mutableSetOf<AlertDialog>()
     private val installedVersion by lazy {
         packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
     }
@@ -111,6 +118,11 @@ class MainActivity : AppCompatActivity() {
             }
             addView(settingsButton, LinearLayout.LayoutParams(dp(48), dp(48)))
             addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(Button(context).apply {
+                text = "الجدولة"
+                style(filled = false, compact = true)
+                setOnClickListener { showSchedules() }
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
             addView(Button(context).apply {
                 text = "المجموعات"
                 style(filled = false)
@@ -188,10 +200,20 @@ class MainActivity : AppCompatActivity() {
                 filterApps()
             }
         }
-        listOf(filterButton, clearSelectionBtn, stopSelectedBtn).forEachIndexed { index, button ->
+        val selectAll = Button(this).apply {
+            text = "تحديد الكل"
+            style(filled = false, compact = true)
+            setOnClickListener {
+                selectedPackages.addAll(allApps.map { it.packageName })
+                saveSelection(updateGroup = true)
+                filterApps()
+            }
+        }
+        val actions = listOf(filterButton, selectAll, clearSelectionBtn, stopSelectedBtn)
+        actions.forEachIndexed { index, button ->
             button.textSize = 12f
             selectionActions.addView(button, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                if (index < 2) marginEnd = selectionActions.dp(6)
+                if (index < actions.lastIndex) marginEnd = selectionActions.dp(4)
             })
         }
         root.addView(selectionActions)
@@ -228,6 +250,8 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {}
         })
 
+        mainContent = root
+        root.visibility = if (appLock.enabled) View.INVISIBLE else View.VISIBLE
         setContentView(root)
         checkForUpdate()
     }
@@ -237,8 +261,18 @@ class MainActivity : AppCompatActivity() {
         allApps = loadInstalledApps()
         filterApps()
         updateSelectionActions()
-        showStopResult()
         updateServiceStatusUI()
+        if (appLock.enabled && !appUnlocked) showUnlock()
+        else showStopResult()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (appLock.enabled) {
+            appUnlocked = false
+            mainContent.visibility = View.INVISIBLE
+            openDialogs.toList().forEach { it.dismiss() }
+        }
     }
 
     private fun updateServiceStatusUI() {
@@ -263,22 +297,220 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        showStopResult()
+        if (!appLock.enabled || appUnlocked) showStopResult()
     }
 
     override fun onPostResume() {
         super.onPostResume()
+        ForceStopAccessibilityService.controllerResumed()
         if (intent.getBooleanExtra(ForceStopAccessibilityService.EXTRA_CONTINUE, false)) {
             intent.removeExtra(ForceStopAccessibilityService.EXTRA_CONTINUE)
             ForceStopAccessibilityService.continueQueue(this)
         }
     }
 
+    private fun dialogBuilder(): AlertDialog.Builder = object : AlertDialog.Builder(this) {
+        override fun show(): AlertDialog {
+            return super.show().also { dialog ->
+                openDialogs.add(dialog)
+                dialog.setOnDismissListener { openDialogs.remove(dialog) }
+            }
+        }
+    }
+
+    private fun showSchedules() {
+        val schedules = StopSchedules.list(this)
+        val dialog = dialogBuilder()
+            .setTitle("جدولة الإيقاف")
+            .setPositiveButton("إضافة جدول") { _, _ -> chooseScheduleTarget() }
+            .setNegativeButton("إغلاق", null)
+        if (schedules.isEmpty()) {
+            dialog.setMessage("اختر تطبيقًا أو مجموعة وحدد فترة التكرار.")
+        } else {
+            dialog.setItems(schedules.map { "${it.name} · كل ${it.minutes} دقيقة" }.toTypedArray()) { _, index ->
+                val schedule = schedules[index]
+                dialogBuilder()
+                    .setTitle(schedule.name)
+                    .setMessage("يتكرر كل ${schedule.minutes} دقيقة تقريبًا.")
+                    .setPositiveButton("حذف الجدول") { _, _ ->
+                        StopSchedules.remove(this, schedule)
+                        showSchedules()
+                    }
+                    .setNegativeButton("رجوع") { _, _ -> showSchedules() }
+                    .show()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun chooseScheduleTarget() {
+        val groups = loadGroups().keys().asSequence().sorted().toList()
+        val apps = allApps
+        dialogBuilder()
+            .setTitle("ما الذي تريد جدولته؟")
+            .setItems(arrayOf("تطبيق", "مجموعة")) { _, type ->
+                val names = if (type == 0) apps.map { it.name } else groups
+                if (names.isEmpty()) {
+                    Toast.makeText(this, "لا توجد عناصر متاحة للجدولة", Toast.LENGTH_SHORT).show()
+                } else {
+                    dialogBuilder()
+                        .setTitle(if (type == 0) "اختر التطبيق" else "اختر المجموعة")
+                        .setItems(names.toTypedArray()) { _, index ->
+                            val target = if (type == 0) apps[index].packageName else names[index]
+                            showScheduleInterval(names[index], target, group = type == 1)
+                        }
+                        .show()
+                }
+            }
+            .show()
+    }
+
+    private fun showScheduleInterval(name: String, target: String, group: Boolean) {
+        val input = EditText(this).apply {
+            hint = "الفترة بالدقائق، مثل 60"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val dialog = dialogBuilder()
+            .setTitle("جدولة إيقاف $name")
+            .setMessage("التوقيت تقريبي. يُنفّذ الإيقاف عند حلول الموعد إذا كان الجهاز مفتوحًا وخدمة إمكانية الوصول مفعّلة.")
+            .setView(input)
+            .setPositiveButton("حفظ", null)
+            .setNegativeButton("إلغاء", null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val minutes = input.text.toString().toIntOrNull()
+            if (minutes == null || minutes < 1) {
+                input.error = "أدخل عدد دقائق صحيحًا من دقيقة فأكثر"
+            } else {
+                StopSchedules.add(this, name, target, group, minutes)
+                dialog.dismiss()
+                showSchedules()
+            }
+        }
+    }
+
+    private fun showUnlock() {
+        if (unlockDialog?.isShowing == true) return
+        unlockDialog = passwordPrompt(
+            title = "فتح تحكم التطبيقات",
+            hint = "كلمة المرور أو رمز الاستخدام الواحد",
+            cancel = { finish() }
+        ) { input ->
+            if (appLock.verify(input)) {
+                appUnlocked = true
+                mainContent.visibility = View.VISIBLE
+                mainContent.post { showStopResult() }
+                null
+            } else passwordError()
+        }
+    }
+
+    private fun showLockSettings() {
+        if (!appLock.enabled) {
+            setAppPassword()
+            return
+        }
+        passwordPrompt("إدارة القفل", "كلمة المرور الثابتة") { input ->
+            if (appLock.verify(input, permanentOnly = true)) {
+                mainContent.post { showLockActions() }
+                null
+            } else passwordError()
+        }
+    }
+
+    private fun showLockActions() {
+        val codeAction = if (appLock.hasOneTimeCode) "استبدال رمز الاستخدام الواحد" else "إنشاء رمز استخدام واحد"
+        dialogBuilder()
+            .setTitle("قفل التطبيق")
+            .setItems(arrayOf("تغيير كلمة المرور", codeAction, "إلغاء قفل التطبيق")) { _, index ->
+                when (index) {
+                    0 -> setAppPassword()
+                    1 -> {
+                        val code = appLock.issueOneTimeCode()
+                        dialogBuilder()
+                            .setTitle("رمز الاستخدام الواحد")
+                            .setMessage(code?.let { "$it\n\nيُعرض الآن فقط، ويُلغى بعد أول دخول ناجح." }
+                                ?: "تعذّر حفظ الرمز.")
+                            .setPositiveButton("تم", null)
+                            .show()
+                            .window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                    2 -> dialogBuilder()
+                        .setTitle("إلغاء قفل التطبيق؟")
+                        .setPositiveButton("إلغاء القفل") { _, _ ->
+                            if (!appLock.disable()) Toast.makeText(this, "تعذّر إلغاء القفل", Toast.LENGTH_SHORT).show()
+                        }
+                        .setNegativeButton("رجوع", null)
+                        .show()
+                }
+            }
+            .show()
+    }
+
+    private fun setAppPassword() {
+        passwordPrompt("كلمة المرور الثابتة", "ثمانية أحرف على الأقل", confirm = true) { input ->
+            when {
+                input.length !in 8..128 -> "اكتب كلمة مرور من 8 إلى 128 حرفًا"
+                !appLock.setPassword(input) -> "تعذّر حفظ كلمة المرور"
+                else -> {
+                    appUnlocked = true
+                    null
+                }
+            }
+        }
+    }
+
+    private fun passwordError() =
+        if (appLock.isCoolingDown) "انتظر 30 ثانية قبل المحاولة من جديد" else "بيانات الدخول غير صحيحة"
+
+    private fun passwordPrompt(
+        title: String,
+        hint: String,
+        confirm: Boolean = false,
+        cancel: (() -> Unit)? = null,
+        submit: (String) -> String?
+    ): AlertDialog {
+        val fields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+        }
+        val password = EditText(this).apply {
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSaveEnabled = false
+        }
+        fields.addView(password)
+        val confirmation = if (confirm) EditText(this).apply {
+            this.hint = "تأكيد كلمة المرور"
+            inputType = password.inputType
+            isSaveEnabled = false
+            fields.addView(this)
+        } else null
+        val dialog = dialogBuilder()
+            .setTitle(title)
+            .setView(fields)
+            .setCancelable(cancel == null)
+            .setPositiveButton("متابعة", null)
+            .setNegativeButton(if (cancel == null) "إلغاء" else "خروج") { _, _ -> cancel?.invoke() }
+            .show()
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val input = password.text.toString()
+            if (confirmation != null && input != confirmation.text.toString()) {
+                confirmation.error = "كلمتا المرور غير متطابقتين"
+            } else {
+                val error = submit(input)
+                if (error == null) dialog.dismiss() else password.error = error
+            }
+        }
+        return dialog
+    }
+
     private fun showGroups() {
         val groups = loadGroups()
         val names = groups.keys().asSequence().sorted().toList()
         val selected = allApps.filter { it.packageName in selectedPackages }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = dialogBuilder()
             .setTitle("المجموعات")
             .setNegativeButton("إغلاق", null)
             .setNeutralButton("حفظ المحدد كمجموعة") { _, _ -> saveGroup(groups, selected) }
@@ -302,11 +534,11 @@ class MainActivity : AppCompatActivity() {
     private fun loadGroups() = JSONObject(preferences.getString("app_groups", "{}") ?: "{}")
 
     private fun showDeleteGroup(groups: JSONObject, names: List<String>) {
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setTitle("اختر المجموعة المراد حذفها")
             .setItems(names.toTypedArray()) { _, index ->
                 val name = names[index]
-                AlertDialog.Builder(this)
+                dialogBuilder()
                     .setTitle("حذف مجموعة «$name»؟")
                     .setNegativeButton("إلغاء", null)
                     .setPositiveButton("حذف") { _, _ ->
@@ -314,6 +546,8 @@ class MainActivity : AppCompatActivity() {
                         val edit = preferences.edit().putString("app_groups", groups.toString())
                         if (preferences.getString("active_group", null) == name) edit.remove("active_group")
                         edit.apply()
+                        StopSchedules.list(this).filter { it.group && it.target == name }
+                            .forEach { StopSchedules.remove(this, it) }
                         showGroups()
                     }
                     .show()
@@ -328,7 +562,7 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
             setPadding(dp(20), dp(12), dp(20), dp(12))
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = dialogBuilder()
             .setTitle("اسم المجموعة")
             .setView(input)
             .setPositiveButton("حفظ", null)
@@ -383,6 +617,11 @@ class MainActivity : AppCompatActivity() {
                 }
             })
             addView(Button(context).apply {
+                text = "قفل التطبيق"
+                style(filled = false)
+                setOnClickListener { showLockSettings() }
+            })
+            addView(Button(context).apply {
                 val latest = availableVersion
                 text = if (latest == null) "التحقق من التحديث" else "تنزيل تحديث $latest"
                 style(filled = false)
@@ -392,7 +631,7 @@ class MainActivity : AppCompatActivity() {
                 }
             })
         }
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setTitle("إعدادات التطبيق")
             .setView(details)
             .setPositiveButton("المطور Sameer LAB") { _, _ ->
@@ -431,8 +670,8 @@ class MainActivity : AppCompatActivity() {
                 if (latest != null) {
                     updateBanner.text = "يتوفر تحديث $latest"
                     updateBanner.visibility = View.VISIBLE
-                    if (showResult) {
-                        AlertDialog.Builder(this)
+                    if (showResult && (!appLock.enabled || appUnlocked)) {
+                        dialogBuilder()
                             .setTitle("يتوفر تحديث $latest")
                             .setPositiveButton("صفحة التنزيل") { _, _ -> openWebsite(AppUpdates.RELEASES_PAGE) }
                             .setNegativeButton("لاحقًا", null)
@@ -450,7 +689,7 @@ class MainActivity : AppCompatActivity() {
     private fun showStopResult() {
         val message = intent.getStringExtra(ForceStopAccessibilityService.EXTRA_RESULT) ?: return
         intent.removeExtra(ForceStopAccessibilityService.EXTRA_RESULT)
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setTitle("نتيجة الإيقاف")
             .setMessage(message)
             .setPositiveButton("تم", null)

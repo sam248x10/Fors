@@ -1,0 +1,3 @@
+<full-backup-content>
+    <exclude domain="sharedpref" path="app_lock.xml" />
+</full-backup-content>

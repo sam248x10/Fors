@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <queries>
         <intent>
@@ -17,6 +18,8 @@
     <application
         android:icon="@drawable/ic_app_controller"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/app_backup_rules"
+        android:dataExtractionRules="@xml/app_data_rules"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppController">
@@ -29,6 +32,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver android:name=".StopScheduleReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".ForceStopAccessibilityService"
