@@ -6,13 +6,22 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Gravity
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import androidx.core.content.res.ResourcesCompat
 
 class ForceStopAccessibilityService : AccessibilityService() {
     private data class Target(val name: String, val packageName: String)
@@ -49,12 +58,19 @@ class ForceStopAccessibilityService : AccessibilityService() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    private val windowManager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
     private val queue = ArrayDeque<Target>()
     private var request: Request? = null
     private var running = false
     private var singleTarget: Target? = null
     private var stopped = 0
     private var skipped = 0
+    private var alreadyStopped = 0
+    private var total = 0
+    private var cancelled = false
+    private var progressCard: LinearLayout? = null
+    private var progressLabel: TextView? = null
+    private var progressBar: ProgressBar? = null
     private val failures = mutableListOf<String>()
     private val timeout = Runnable {
         val current = request
@@ -86,8 +102,11 @@ class ForceStopAccessibilityService : AccessibilityService() {
             root.packageName?.toString() == current.settingsPackage &&
             (root.windowId == current.appInfoWindowId ||
                 findLabel(root, listOf(current.target.name)) != null)
-        if (settingsStillOpen) performGlobalAction(GLOBAL_ACTION_BACK)
-        handler.postDelayed(advance, 350L)
+        if (settingsStillOpen && performGlobalAction(GLOBAL_ACTION_BACK)) {
+            handler.postDelayed(advance, 250L)
+        } else {
+            handler.post(advance)
+        }
     }
     private var requestToClose: Request? = null
 
@@ -102,19 +121,35 @@ class ForceStopAccessibilityService : AccessibilityService() {
         singleTarget = queue.singleOrNull()
         stopped = 0
         skipped = 0
+        alreadyStopped = 0
+        total = queue.size
+        cancelled = false
         failures.clear()
         running = true
+        if (total > 1) showProgress()
         openNextTarget(activity)
         return true
     }
 
     private fun openNextTarget(activity: Activity) {
         if (!running) return
-        val target = queue.removeFirstOrNull()
+        var target = queue.removeFirstOrNull()
+        while (target != null) {
+            try {
+                if (!isStopped(target.packageName)) break
+                alreadyStopped++
+            } catch (_: PackageManager.NameNotFoundException) {
+                skipped++
+                failures.add("${target.name}: التطبيق غير متاح")
+            }
+            target = queue.removeFirstOrNull()
+        }
         if (target == null) {
             finishQueue()
             return
         }
+        progressLabel?.text = "جاري إيقاف ${target.name} · ${total - queue.size} من $total"
+        progressBar?.progress = total - queue.size - 1
 
         val intent = Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -150,8 +185,7 @@ class ForceStopAccessibilityService : AccessibilityService() {
 
     private fun inspectSettings(current: Request) {
         try {
-            val info = packageManager.getApplicationInfo(current.target.packageName, 0)
-            if (info.flags and ApplicationInfo.FLAG_STOPPED != 0) {
+            if (isStopped(current.target.packageName)) {
                 completeTarget(success = true)
                 return
             }
@@ -194,26 +228,99 @@ class ForceStopAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun isStopped(packageName: String): Boolean =
+        packageManager.getApplicationInfo(packageName, 0).flags and ApplicationInfo.FLAG_STOPPED != 0
+
     private fun completeTarget(success: Boolean) {
         requestToClose = request
         request = null
         handler.removeCallbacks(timeout)
         handler.removeCallbacks(poll)
         if (success) stopped++ else skipped++
-        handler.postDelayed(closeSettings, 350L)
+        if (requestToClose == null) handler.post(advance)
+        else handler.postDelayed(closeSettings, 250L)
     }
 
     private fun finishQueue() {
         running = false
+        hideProgress()
         val target = singleTarget
         singleTarget = null
         val message = when {
-            target == null -> "اكتملت العملية. تم إيقاف: $stopped. تعذّر إيقاف: $skipped."
+            cancelled -> "أُلغيت العملية. تم إيقاف: $stopped. موقوف مسبقًا: $alreadyStopped."
+            target == null -> "تم إيقاف: $stopped. موقوف مسبقًا: $alreadyStopped. تعذّر الإيقاف: $skipped."
+            alreadyStopped == 1 -> "${target.name} موقوف بالفعل."
             stopped == 1 -> "تم فرض إيقاف ${target.name}."
             else -> "تعذّر فرض إيقاف ${target.name}."
         }
         val details = failures.joinToString("\n")
         returnToController(if (details.isEmpty()) message else "$message\n\n$details")
+    }
+
+    private fun showProgress() {
+        val font = ResourcesCompat.getFont(this, R.font.cairo)
+        val density = resources.displayMetrics.density
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = (14 * density).toInt()
+            setPadding(padding, padding, padding, padding)
+            background = GradientDrawable().apply {
+                setColor(0xFF211A11.toInt())
+                setStroke((density + 0.5f).toInt(), 0xFFF3C969.toInt())
+                cornerRadius = 14 * density
+            }
+            progressLabel = TextView(context).apply {
+                typeface = font
+                textSize = 15f
+                text = "جاري فحص التطبيقات…"
+                setTextColor(0xFFFFF4DD.toInt())
+            }.also { addView(it) }
+            progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = total
+                progressTintList = android.content.res.ColorStateList.valueOf(0xFFF3C969.toInt())
+            }.also { addView(it, LinearLayout.LayoutParams(-1, -2)) }
+            addView(Button(context).apply {
+                typeface = font
+                text = "إلغاء"
+                setOnClickListener { cancelQueue() }
+            })
+        }
+        val params = WindowManager.LayoutParams(
+            (resources.displayMetrics.widthPixels - 32 * density).toInt().coerceAtMost((360 * density).toInt()),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = (18 * density).toInt()
+        }
+        try {
+            windowManager.addView(card, params)
+            progressCard = card
+        } catch (_: WindowManager.BadTokenException) {
+            hideProgress()
+        } catch (_: SecurityException) {
+            hideProgress()
+        }
+    }
+
+    private fun hideProgress() {
+        progressCard?.let { windowManager.removeView(it) }
+        progressCard = null
+        progressLabel = null
+        progressBar = null
+    }
+
+    private fun cancelQueue() {
+        if (!running) return
+        cancelled = true
+        handler.removeCallbacksAndMessages(null)
+        requestToClose = request ?: requestToClose
+        request = null
+        queue.clear()
+        hideProgress()
+        handler.post(closeSettings)
     }
 
     private fun returnToController(message: String? = null) {
@@ -249,17 +356,12 @@ class ForceStopAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        if (!running) return
-        handler.removeCallbacksAndMessages(null)
-        requestToClose = null
-        skipped += queue.size + if (request != null) 1 else 0
-        queue.clear()
-        request = null
-        finishQueue()
+        cancelQueue()
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        hideProgress()
         if (connectedService === this) connectedService = null
         super.onDestroy()
     }

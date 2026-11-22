@@ -11,13 +11,26 @@ android {
         applicationId = "com.appcontroller.tool"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.13"
+        versionCode = 3
+        versionName = "0.14"
+    }
+
+    val releaseKeystore = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+    if (releaseKeystore != null) {
+        signingConfigs.create("distribution") {
+            storeFile = file(releaseKeystore)
+            storePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").get()
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("distribution")
+            }
         }
     }
     compileOptions {

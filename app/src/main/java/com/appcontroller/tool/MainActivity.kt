@@ -72,6 +72,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stopSelectedBtn: Button
     private lateinit var clearSelectionBtn: Button
     private lateinit var searchInput: EditText
+    private lateinit var updateBanner: Button
+    private var availableVersion: String? = null
+    private var checkingUpdate = false
+    private val installedVersion by lazy {
+        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+    }
     private var showSelectedOnly = false
     private val preferences by lazy { getSharedPreferences("app_selection", MODE_PRIVATE) }
     private val selectedPackages by lazy {
@@ -112,6 +118,12 @@ class MainActivity : AppCompatActivity() {
             })
         }
         root.addView(header)
+        updateBanner = Button(this).apply {
+            visibility = View.GONE
+            style(filled = true)
+            setOnClickListener { openWebsite(AppUpdates.RELEASES_PAGE) }
+        }
+        root.addView(updateBanner)
 
         // شريط حالة صلاحية الوصول
         statusBanner = TextView(this).apply {
@@ -217,6 +229,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         setContentView(root)
+        checkForUpdate()
     }
 
     override fun onResume() {
@@ -340,12 +353,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAppSettings() {
-        val version = packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
         val details = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), dp(8))
             addView(TextView(context).apply {
-                text = "الإصدار $version"
+                text = "الإصدار $installedVersion"
                 setTextColor(gold)
                 textSize = 14f
             })
@@ -370,16 +382,21 @@ class MainActivity : AppCompatActivity() {
                         else AppCompatDelegate.MODE_NIGHT_NO
                 }
             })
+            addView(Button(context).apply {
+                val latest = availableVersion
+                text = if (latest == null) "التحقق من التحديث" else "تنزيل تحديث $latest"
+                style(filled = false)
+                setOnClickListener {
+                    if (availableVersion != null) openWebsite(AppUpdates.RELEASES_PAGE)
+                    else checkForUpdate(showResult = true)
+                }
+            })
         }
         AlertDialog.Builder(this)
             .setTitle("إعدادات التطبيق")
             .setView(details)
             .setPositiveButton("المطور Sameer LAB") { _, _ ->
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://sameerlab.com")))
-                } catch (_: ActivityNotFoundException) {
-                    Toast.makeText(this, "لا يوجد متصفح لفتح الموقع", Toast.LENGTH_SHORT).show()
-                }
+                openWebsite("https://sameerlab.com")
             }
             .setNegativeButton("إغلاق", null)
             .show()
@@ -387,6 +404,47 @@ class MainActivity : AppCompatActivity() {
                 window?.setBackgroundDrawable(statusBanner.rounded(statusBanner.surface, 16, statusBanner.border))
                 getButton(AlertDialog.BUTTON_POSITIVE).style(filled = true)
             }
+    }
+
+    private fun openWebsite(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "لا يوجد متصفح لفتح الموقع", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun checkForUpdate(showResult: Boolean = false) {
+        if (checkingUpdate) {
+            if (showResult) Toast.makeText(this, "جارٍ التحقق من التحديث…", Toast.LENGTH_SHORT).show()
+            return
+        }
+        checkingUpdate = true
+        val version = installedVersion
+        Thread {
+            val result = runCatching { AppUpdates.newerVersion(version) }
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                checkingUpdate = false
+                val latest = result.getOrNull()
+                if (result.isSuccess) availableVersion = latest
+                if (latest != null) {
+                    updateBanner.text = "يتوفر تحديث $latest"
+                    updateBanner.visibility = View.VISIBLE
+                    if (showResult) {
+                        AlertDialog.Builder(this)
+                            .setTitle("يتوفر تحديث $latest")
+                            .setPositiveButton("صفحة التنزيل") { _, _ -> openWebsite(AppUpdates.RELEASES_PAGE) }
+                            .setNegativeButton("لاحقًا", null)
+                            .show()
+                    }
+                } else if (showResult) {
+                    val message = if (result.isSuccess) "لا يوجد إصدار أحدث متاح"
+                        else "تعذّر التحقق من التحديث. حاول مجددًا."
+                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
     }
 
     private fun showStopResult() {
@@ -491,7 +549,10 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = RecyclerView.LayoutParams(
                     RecyclerView.LayoutParams.MATCH_PARENT,
                     RecyclerView.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = dp(8) }
+                ).apply {
+                    topMargin = dp(1)
+                    bottomMargin = dp(1)
+                }
             }
             val iconView = ImageView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
